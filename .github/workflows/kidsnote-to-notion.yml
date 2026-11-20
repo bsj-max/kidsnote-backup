@@ -348,3 +348,27 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh api -X PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/kidsnote-to-notion.yml/enable"
+
+  # The API re-enable above does not count as repository activity, so
+  # GitHub still switched the cron off ~60 days after the last commit
+  # (2026-11, last commit 2026-09-14). A real commit resets that timer:
+  # once the newest commit is older than 30 days, push an empty one.
+  keepalive:
+    needs: mirror
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Empty commit when the repo has been quiet for 30 days
+        run: |
+          last=$(git log -1 --format=%ct)
+          age=$(( $(date +%s) - last ))
+          echo "last commit is $(( age / 86400 )) days old"
+          if [ "$age" -gt $(( 30 * 86400 )) ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
+            git commit --allow-empty -m "chore: keepalive (prevent 60-day cron auto-disable)"
+            git push
+          fi
