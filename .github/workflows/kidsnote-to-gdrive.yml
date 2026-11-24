@@ -13,7 +13,7 @@
 #   RCLONE_CONF                             rclone.conf 파일 내용 전체
 #                                           (리모트 이름은 반드시 "gdrive")
 # 선택 Variable:
-#   GDRIVE_PATH                             드라이브 안 폴더 (기본: 키즈노트 알림장)
+#   GDRIVE_PATH                             드라이브 안 폴더 (기본: 키즈노트)
 #
 # GitHub 서버는 매번 빈 상태에서 시작하므로, 매일 실행은 최근 알림장 30개만
 # (공지·앨범·식단도 각각 최근 30개) 확인합니다. 처음 한 번은 Actions 탭에서 수동 실행하면서 limit 칸을 비워
@@ -96,7 +96,7 @@ jobs:
       - name: Upload to Google Drive
         env:
           RCLONE_CONF: ${{ secrets.RCLONE_CONF }}
-          GDRIVE_PATH: ${{ vars.GDRIVE_PATH || '키즈노트 알림장' }}
+          GDRIVE_PATH: ${{ vars.GDRIVE_PATH || '키즈노트' }}
         run: |
           set -eu
           mkdir -p ~/.config/rclone
