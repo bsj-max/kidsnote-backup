@@ -1,0 +1,104 @@
+# Kidsnote → Google Drive (원본 통째 저장)
+#
+# 매일 새벽 1시(한국시간)에 알림장 원본(본문·사진·동영상·첨부파일)을
+# 용량 제한 없이 구글 드라이브에 저장합니다. 노션 백업과는 별개로 돌아갑니다.
+#
+# 저장 구조:  <GDRIVE_PATH>/<YYYYMMDD_HHMMSS>/note.txt, image_001.jpg, video_001.mp4 ...
+# 이미 드라이브에 있는 파일은 건너뜁니다(--ignore-existing).
+#
+# 필요한 GitHub Secrets (Settings → Secrets and variables → Actions):
+#   KIDSNOTE_USERNAME / KIDSNOTE_PASSWORD   (노션 백업과 같은 값, 이미 있음)
+#   KIDSNOTE_CHILD_NAME                     (선택, 이미 있음)
+#   RCLONE_CONF                             rclone.conf 파일 내용 전체
+#                                           (리모트 이름은 반드시 "gdrive")
+# 선택 Variable:
+#   GDRIVE_PATH                             드라이브 안 폴더 (기본: 키즈노트 알림장)
+#
+# GitHub 서버는 매번 빈 상태에서 시작하므로, 매일 실행은 최근 알림장 30개만
+# 확인합니다. 처음 한 번은 Actions 탭에서 수동 실행하면서 limit 칸을 비워
+# 전체를 받으세요.
+
+name: Kidsnote → Google Drive
+
+on:
+  schedule:
+    # 16:04 UTC = 01:04 KST
+    - cron: "4 16 * * *"
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "최근 N개 알림장만 저장 (전체를 받으려면 비워두세요)"
+        required: false
+        default: "30"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kidsnote-to-gdrive
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check RCLONE_CONF
+        env:
+          RCLONE_CONF: ${{ secrets.RCLONE_CONF }}
+        run: |
+          if [ -z "$RCLONE_CONF" ]; then
+            echo "::error::RCLONE_CONF secret이 없습니다. 워크플로 파일 맨 위 설명대로 등록하세요."
+            exit 1
+          fi
+          if ! printf '%s' "$RCLONE_CONF" | grep -q '^\[gdrive\]'; then
+            echo "::error::RCLONE_CONF 안에 [gdrive] 리모트가 없습니다. rclone config에서 리모트 이름을 gdrive로 만드세요."
+            exit 1
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r tools/kidsnote_fetch/requirements.txt
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq rclone
+
+      - name: Download Kidsnote originals
+        env:
+          KIDSNOTE_USERNAME: ${{ secrets.KIDSNOTE_USERNAME }}
+          KIDSNOTE_PASSWORD: ${{ secrets.KIDSNOTE_PASSWORD }}
+          KIDSNOTE_SESSION_COOKIE: ${{ secrets.KIDSNOTE_SESSION_COOKIE }}
+          KIDSNOTE_CHILD_NAME: ${{ secrets.KIDSNOTE_CHILD_NAME || vars.KIDSNOTE_CHILD_NAME || '' }}
+          LIMIT: ${{ github.event_name == 'schedule' && '30' || inputs.limit }}
+          PYTHONUNBUFFERED: "1"
+        run: |
+          set -eu
+          ARGS=( "--auth-mode" "session-cookie-env" "--backup-root" "$RUNNER_TEMP/kidsnote" )
+          if [ -n "$KIDSNOTE_CHILD_NAME" ]; then
+            ARGS+=( "--child-name" "$KIDSNOTE_CHILD_NAME" )
+          fi
+          if [ -n "$LIMIT" ]; then
+            ARGS+=( "--limit" "$LIMIT" )
+          fi
+          python tools/kidsnote_fetch/fetch.py "${ARGS[@]}"
+
+      - name: Upload to Google Drive
+        env:
+          RCLONE_CONF: ${{ secrets.RCLONE_CONF }}
+          GDRIVE_PATH: ${{ vars.GDRIVE_PATH || '키즈노트 알림장' }}
+        run: |
+          set -eu
+          mkdir -p ~/.config/rclone
+          printf '%s\n' "$RCLONE_CONF" > ~/.config/rclone/rclone.conf
+          chmod 600 ~/.config/rclone/rclone.conf
+          rclone copy "$RUNNER_TEMP/kidsnote" "gdrive:$GDRIVE_PATH" \
+            --ignore-existing --transfers 4 --stats-one-line --stats 30s -v
+          rm -f ~/.config/rclone/rclone.conf
