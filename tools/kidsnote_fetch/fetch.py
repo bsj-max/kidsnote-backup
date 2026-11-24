@@ -428,6 +428,93 @@ def _save_report(
     return folder, new_files
 
 
+MENU_TEXT_KEYS = (
+    ("morning", "아침"), ("morning_snack", "오전 간식"), ("lunch", "점심"),
+    ("afternoon_snack", "오후 간식"), ("dinner", "저녁"),
+)
+
+
+def _save_menu(
+    sess: requests.Session,
+    menu: dict[str, Any],
+    root: Path,
+) -> int:
+    """Save one daily menu as <root>/<YYYYMMDD>/menu.txt + food photos."""
+    day = str(menu.get("date_menu") or "").replace("-", "")
+    if not day:
+        return 0
+    folder = root / day
+    folder.mkdir(parents=True, exist_ok=True)
+    new_files = 0
+    note = folder / "menu.txt"
+    if not note.exists():
+        lines = [f"{label}: {menu.get(key)}" for key, label in MENU_TEXT_KEYS
+                 if menu.get(key)]
+        note.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        new_files += 1
+    for key, _label in MENU_TEXT_KEYS:
+        img = menu.get(f"{key}_img")
+        if isinstance(img, list):
+            imgs = img
+        elif img:
+            imgs = [img]
+        else:
+            imgs = []
+        for i, one in enumerate(imgs, start=1):
+            if _download_attachment(sess, one, folder, f"{key}_{i:02d}",
+                                    default_suffix=".jpg"):
+                new_files += 1
+    return new_files
+
+
+def _save_extras(
+    sess: requests.Session,
+    args: argparse.Namespace,
+    target: dict[str, Any],
+    center_id: int | None,
+) -> None:
+    """--extras-root: notices / albums / menus as files (no size limit)."""
+    root: Path = args.extras_root
+    kinds: list[tuple[str, Any]] = []
+    if not args.no_notices and center_id:
+        kinds.append(("공지", lambda: _list_notices(sess, int(center_id))))
+    if not args.no_albums:
+        kinds.append(("앨범", lambda: _list_albums(sess, int(target["id"]))))
+    for label, lister in kinds:
+        try:
+            items = lister()
+        except Exception as e:
+            _LOGGER.warning("extras: %s list failed: %s", label, e)
+            continue
+        if args.limit:
+            items = items[: args.limit]
+        n_new = 0
+        for it in items:
+            try:
+                _folder, n = _save_report(sess, it, root / label)
+                n_new += n
+            except Exception as e:
+                _LOGGER.warning("extras: %s id=%s save failed: %s",
+                                label, it.get("id"), e)
+        _LOGGER.info("local save (%s): %d items, %d new files", label, len(items), n_new)
+    if not args.no_menus and center_id:
+        try:
+            menus = _list_menus(sess, int(center_id))
+        except Exception as e:
+            _LOGGER.warning("extras: 식단 list failed: %s", e)
+            menus = []
+        menus = sorted(menus, key=lambda m: str(m.get("date_menu") or ""), reverse=True)
+        if args.limit:
+            menus = menus[: args.limit]
+        n_new = 0
+        for m in menus:
+            try:
+                n_new += _save_menu(sess, m, root / "식단")
+            except Exception as e:
+                _LOGGER.warning("extras: 식단 %s save failed: %s", m.get("date_menu"), e)
+        _LOGGER.info("local save (식단): %d days, %d new files", len(menus), n_new)
+
+
 def _download_attachment(
     sess: requests.Session,
     obj: Any,
@@ -623,6 +710,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="Skip center-wide notice sync.")
     ap.add_argument("--no-albums", action="store_true",
                     help="Skip photo album sync.")
+    ap.add_argument("--extras-root", type=Path,
+                    help="Also save notices / albums / daily menus as files under "
+                         "<extras-root>/공지, /앨범, /식단 (same per-item folder layout "
+                         "as reports). Respects --no-notices / --no-albums / --no-menus "
+                         "and --limit.")
     # ---- LLM toggles -----
     # The script can be split into two layers of LLM-driven content:
     #   1. Per-alimnota inline callouts: 💭 요약 / 🧒 자녀의 일기 /
@@ -961,6 +1053,9 @@ def main(argv: list[str] | None = None) -> int:
         center_id = enr[0].get("center_id") or enr[0].get("center")
     elif isinstance(enr, dict):
         center_id = enr.get("center_id") or enr.get("center")
+
+    if args.extras_root is not None:
+        _save_extras(sess, args, target, center_id)
 
     # ---- Pre-fetch daily menus once, so reports can embed the matching
     # ----- day's menu summary inline. Menus matched to a report are

@@ -1,9 +1,10 @@
 # Kidsnote → Google Drive (원본 통째 저장)
 #
-# 매일 새벽 1시(한국시간)에 알림장 원본(본문·사진·동영상·첨부파일)을
+# 매일 새벽 1시(한국시간)에 알림장·공지·앨범·식단 원본(본문·사진·동영상·첨부파일)을
 # 용량 제한 없이 구글 드라이브에 저장합니다. 노션 백업과는 별개로 돌아갑니다.
 #
-# 저장 구조:  <GDRIVE_PATH>/<YYYYMMDD_HHMMSS>/note.txt, image_001.jpg, video_001.mp4 ...
+# 저장 구조:  <GDRIVE_PATH>/알림장|공지|앨범/<YYYYMMDD_HHMMSS>/note.txt, image_001.jpg, video_001.mp4 ...
+#             <GDRIVE_PATH>/식단/<YYYYMMDD>/menu.txt, lunch_01.jpg ...
 # 이미 드라이브에 있는 파일은 건너뜁니다(--ignore-existing).
 #
 # 필요한 GitHub Secrets (Settings → Secrets and variables → Actions):
@@ -15,7 +16,7 @@
 #   GDRIVE_PATH                             드라이브 안 폴더 (기본: 키즈노트 알림장)
 #
 # GitHub 서버는 매번 빈 상태에서 시작하므로, 매일 실행은 최근 알림장 30개만
-# 확인합니다. 처음 한 번은 Actions 탭에서 수동 실행하면서 limit 칸을 비워
+# (공지·앨범·식단도 각각 최근 30개) 확인합니다. 처음 한 번은 Actions 탭에서 수동 실행하면서 limit 칸을 비워
 # 전체를 받으세요.
 
 name: Kidsnote → Google Drive
@@ -27,7 +28,7 @@ on:
   workflow_dispatch:
     inputs:
       limit:
-        description: "최근 N개 알림장만 저장 (전체를 받으려면 비워두세요)"
+        description: "최근 N개 (알림장·공지·앨범·식단 각각)만 저장 (전체를 받으려면 비워두세요)"
         required: false
         default: "30"
 
@@ -81,7 +82,9 @@ jobs:
           PYTHONUNBUFFERED: "1"
         run: |
           set -eu
-          ARGS=( "--auth-mode" "session-cookie-env" "--backup-root" "$RUNNER_TEMP/kidsnote" )
+          ARGS=( "--auth-mode" "session-cookie-env"
+                 "--backup-root" "$RUNNER_TEMP/kidsnote/알림장"
+                 "--extras-root" "$RUNNER_TEMP/kidsnote" )
           if [ -n "$KIDSNOTE_CHILD_NAME" ]; then
             ARGS+=( "--child-name" "$KIDSNOTE_CHILD_NAME" )
           fi
