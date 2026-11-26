@@ -685,6 +685,26 @@ def _chronological_key(item: dict[str, Any]) -> tuple[str, int]:
     return (date, iid)
 
 
+def _child_folder(sess: requests.Session, child: dict[str, Any]) -> str:
+    """Name-free folder label for one child profile: '<y0>-<y1>_<id>'.
+
+    Kidsnote makes a new child profile per enrollment, so one real child can
+    have several profiles (e.g. daycare, then kindergarten). The year range
+    tells them apart without putting the child's name in public CI logs.
+    """
+    cid = child.get("id")
+    try:
+        reports = _list_reports(sess, int(cid))
+    except Exception as e:
+        _LOGGER.warning("report list for child id=%s failed: %s", cid, e)
+        reports = []
+    years = sorted({str(r.get("date_written") or "")[:4] for r in reports} - {""})
+    if not years:
+        return f"{cid}"
+    span = years[0] if years[0] == years[-1] else f"{years[0]}-{years[-1]}"
+    return f"{span}_{cid}"
+
+
 def _pick_child(
     children: list[dict[str, Any]],
     child_id: int | None,
@@ -782,6 +802,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="Skip center-wide notice sync.")
     ap.add_argument("--no-albums", action="store_true",
                     help="Skip photo album sync.")
+    ap.add_argument("--list-children-json", type=Path,
+                    help="Write [{id, folder}] for every child profile on the account to "
+                         "this file and exit. `folder` is '<first year>-<last year>_<id>' "
+                         "from the profile's reports, with no name in it, so it is safe "
+                         "to print in public CI logs.")
     ap.add_argument("--save-comments", action="store_true",
                     help="Local save: also write each item's comments to comments.txt "
                          "(other parents' comments on center-wide notices are skipped).")
@@ -966,6 +991,11 @@ def main(argv: list[str] | None = None) -> int:
 
     # ---- enumerate child + reports -----
     children = _list_children(sess)
+    if args.list_children_json is not None:
+        roster = [{"id": c.get("id"), "folder": _child_folder(sess, c)} for c in children]
+        args.list_children_json.write_text(json.dumps(roster), encoding="utf-8")
+        _LOGGER.info("child roster: %s", ", ".join(r["folder"] for r in roster))
+        return 0
     # ALWAYS print the full child roster so operators can self-diagnose
     # multi-child accounts. Previously the only log line was "fetched N
     # reports for child id=...", which silently swallowed the selection.

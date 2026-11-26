@@ -3,21 +3,22 @@
 # 매일 새벽 1시(한국시간)에 알림장·공지·앨범·식단 원본(본문·사진·동영상·첨부파일)을
 # 용량 제한 없이 구글 드라이브에 저장합니다. 노션 백업과는 별개로 돌아갑니다.
 #
-# 저장 구조:  <GDRIVE_PATH>/알림장|공지|앨범/<YYYYMMDD_HHMMSS>/note.txt, comments.txt, image_001.jpg, video_001.mp4 ...
-#             <GDRIVE_PATH>/식단/<YYYYMMDD>/menu.txt, lunch_01.jpg ...
+# 저장 구조:  <GDRIVE_PATH>/<프로필>/알림장|공지|앨범/<YYYYMMDD_HHMMSS>/note.txt, comments.txt, image_001.jpg, video_001.mp4 ...
+#             <GDRIVE_PATH>/<프로필>/식단/<YYYYMMDD>/menu.txt, lunch_01.jpg ...
+# 키즈노트는 입학(기관)마다 아이 프로필을 새로 만들기 때문에, 계정의 모든 프로필을
+# 각각 저장합니다. <프로필> 폴더 이름은 "<알림장 첫해>-<마지막 해>_<프로필 id>"이고
+# 공개 저장소의 실행 로그에 남기 때문에 아이 이름은 넣지 않습니다.
 # 이미 드라이브에 있는 파일은 건너뜁니다(--ignore-existing).
 #
 # 필요한 GitHub Secrets (Settings → Secrets and variables → Actions):
 #   KIDSNOTE_USERNAME / KIDSNOTE_PASSWORD   (노션 백업과 같은 값, 이미 있음)
-#   KIDSNOTE_CHILD_NAME                     (선택, 이미 있음)
 #   RCLONE_CONF                             rclone.conf 파일 내용 전체
 #                                           (리모트 이름은 반드시 "gdrive")
 # 선택 Variable:
 #   GDRIVE_PATH                             드라이브 안 폴더 (기본: 키즈노트)
 #
 # GitHub 서버는 매번 빈 상태에서 시작하므로, 매일 실행은 최근 알림장 30개만
-# (공지·앨범·식단도 각각 최근 30개) 확인합니다. 처음 한 번은 Actions 탭에서 수동 실행하면서 limit 칸을 비워
-# 전체를 받으세요.
+# (공지·앨범·식단도 각각 최근 30개) 확인합니다. 수동 실행(Run workflow)은 기본값 all로 전체를 받습니다.
 
 name: Kidsnote → Google Drive
 
@@ -28,9 +29,9 @@ on:
   workflow_dispatch:
     inputs:
       limit:
-        description: "최근 N개 (알림장·공지·앨범·식단 각각)만 저장 (전체를 받으려면 비워두세요)"
+        description: "최근 N개 (알림장·공지·앨범·식단 각각)만 저장 (전체를 받으려면 all)"
         required: false
-        default: "30"
+        default: "all"
 
 permissions:
   contents: read
@@ -77,21 +78,27 @@ jobs:
           KIDSNOTE_USERNAME: ${{ secrets.KIDSNOTE_USERNAME }}
           KIDSNOTE_PASSWORD: ${{ secrets.KIDSNOTE_PASSWORD }}
           KIDSNOTE_SESSION_COOKIE: ${{ secrets.KIDSNOTE_SESSION_COOKIE }}
-          KIDSNOTE_CHILD_NAME: ${{ secrets.KIDSNOTE_CHILD_NAME || vars.KIDSNOTE_CHILD_NAME || '' }}
           LIMIT: ${{ github.event_name == 'schedule' && '30' || inputs.limit }}
           PYTHONUNBUFFERED: "1"
         run: |
           set -eu
-          ARGS=( "--auth-mode" "session-cookie-env" "--save-comments"
-                 "--backup-root" "$RUNNER_TEMP/kidsnote/알림장"
-                 "--extras-root" "$RUNNER_TEMP/kidsnote" )
-          if [ -n "$KIDSNOTE_CHILD_NAME" ]; then
-            ARGS+=( "--child-name" "$KIDSNOTE_CHILD_NAME" )
+          OUT="$RUNNER_TEMP/kidsnote"
+          BASE=( "--auth-mode" "session-cookie-env" )
+          python tools/kidsnote_fetch/fetch.py "${BASE[@]}" \
+            --list-children-json "$RUNNER_TEMP/children.json"
+          LIM=()
+          if [ -n "$LIMIT" ] && [ "$LIMIT" != "all" ] && [ "$LIMIT" != "0" ]; then
+            LIM=( "--limit" "$LIMIT" )
           fi
-          if [ -n "$LIMIT" ]; then
-            ARGS+=( "--limit" "$LIMIT" )
-          fi
-          python tools/kidsnote_fetch/fetch.py "${ARGS[@]}"
+          for row in $(jq -r '.[] | "\(.id):\(.folder)"' "$RUNNER_TEMP/children.json"); do
+            id="${row%%:*}"; folder="${row#*:}"
+            echo "::group::profile $folder"
+            python tools/kidsnote_fetch/fetch.py "${BASE[@]}" --save-comments \
+              --child-id "$id" \
+              --backup-root "$OUT/$folder/알림장" \
+              --extras-root "$OUT/$folder" "${LIM[@]}"
+            echo "::endgroup::"
+          done
 
       - name: Upload to Google Drive
         env:
@@ -102,6 +109,17 @@ jobs:
           mkdir -p ~/.config/rclone
           printf '%s\n' "$RCLONE_CONF" > ~/.config/rclone/rclone.conf
           chmod 600 ~/.config/rclone/rclone.conf
+          # 예전 구조(프로필 폴더 없이 바로 알림장/앨범...)로 올라간 파일은 첫 번째
+          # 프로필 것이므로 그 프로필 폴더 아래로 옮깁니다(드라이브 안에서 이동, 한 번만).
+          FIRST="$(jq -r '.[0].folder' "$RUNNER_TEMP/children.json")"
+          for d in 알림장 공지 앨범 식단; do
+            if rclone lsf "gdrive:$GDRIVE_PATH" --dirs-only 2>/dev/null | grep -qx "$d/"; then
+              echo "moving old $d/ -> $FIRST/$d/"
+              rclone move "gdrive:$GDRIVE_PATH/$d" "gdrive:$GDRIVE_PATH/$FIRST/$d" \
+                --delete-empty-src-dirs --transfers 8 --stats-one-line --stats 30s
+              rclone rmdir "gdrive:$GDRIVE_PATH/$d" 2>/dev/null || true
+            fi
+          done
           rclone copy "$RUNNER_TEMP/kidsnote" "gdrive:$GDRIVE_PATH" \
             --ignore-existing --transfers 4 --stats-one-line --stats 30s -v
           # 댓글은 나중에 늘어나므로 내용이 바뀐 comments.txt만 덮어씁니다.
