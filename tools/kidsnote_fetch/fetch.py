@@ -373,17 +373,86 @@ def _parse_report_datetime(report: dict[str, Any]) -> datetime:
     return written or datetime.now()
 
 
+COMMENT_AUTHOR_PREFIX = {"teacher": "선생님", "parent": "학부모", "admin": "원"}
+
+
+def _format_comments(comments: list[dict[str, Any]], *, scope: str = "report") -> str:
+    """Plain-text rendering of Kidsnote comments for comments.txt.
+
+    On center-wide notices (``scope="notice"``) comments by parents come from
+    other families and can carry other children's names, so they are left
+    out — same rule as the Notion mirror.
+    """
+    lines: list[str] = []
+    skipped = 0
+    for c in comments:
+        author = c.get("author") or {}
+        atype = (author.get("type") or "").lower()
+        if scope == "notice" and atype == "parent":
+            skipped += 1
+            continue
+        name = c.get("author_name") or author.get("name") or "?"
+        role = COMMENT_AUTHOR_PREFIX.get(atype, "")
+        created = str(c.get("created") or "")[:16].replace("T", " ")
+        content = (c.get("content") or "").strip()
+        if not content and c.get("emoticon_content"):
+            content = "[이모티콘]"
+        head = f"[{created}] {name}" + (f" ({role})" if role else "")
+        lines.append(head)
+        if content:
+            lines.append(content)
+        lines.append("")
+    if skipped:
+        lines.append(f"(다른 학부모 댓글 {skipped}건은 개인정보 보호를 위해 저장하지 않음)")
+    return "\n".join(lines).rstrip() + "\n" if lines else ""
+
+
+def _save_comments(
+    sess: requests.Session,
+    report: dict[str, Any],
+    folder: Path,
+    comment_kind: str,
+    scope: str,
+) -> int:
+    """Write/refresh <folder>/comments.txt. Returns 1 if the file changed."""
+    item_id = report.get("id")
+    if not item_id:
+        return 0
+    comments = _list_comments(sess, comment_kind, int(item_id))
+    if not comments:
+        return 0
+    text = _format_comments(comments, scope=scope)
+    if not text:
+        return 0
+    path = folder / "comments.txt"
+    if path.exists() and path.read_text(encoding="utf-8") == text:
+        return 0
+    path.write_text(text, encoding="utf-8")
+    return 1
+
+
 def _save_report(
     sess: requests.Session,
     report: dict[str, Any],
     backup_root: Path,
+    comment_kind: str | None = None,
+    comment_scope: str = "report",
 ) -> tuple[Path, int]:
-    """Mirror BackupKidsnote-compatible layout for one report. Returns (folder, n_new_files)."""
+    """Mirror BackupKidsnote-compatible layout for one report. Returns (folder, n_new_files).
+
+    With ``comment_kind`` (``reports`` / ``notices`` / ``albums``) the item's
+    comments are also written to ``comments.txt``.
+    """
     dt = _parse_report_datetime(report)
     folder = backup_root / dt.strftime("%Y%m%d_%H%M%S")
     folder.mkdir(parents=True, exist_ok=True)
 
     new_files = 0
+    if comment_kind:
+        try:
+            new_files += _save_comments(sess, report, folder, comment_kind, comment_scope)
+        except Exception as e:
+            _LOGGER.warning("comments for id=%s failed: %s", report.get("id"), e)
 
     # note.txt
     text = _first_existing_key(report, TEXT_KEYS) or ""
@@ -475,12 +544,12 @@ def _save_extras(
 ) -> None:
     """--extras-root: notices / albums / menus as files (no size limit)."""
     root: Path = args.extras_root
-    kinds: list[tuple[str, Any]] = []
+    kinds: list[tuple[str, Any, str, str]] = []
     if not args.no_notices and center_id:
-        kinds.append(("공지", lambda: _list_notices(sess, int(center_id))))
+        kinds.append(("공지", lambda: _list_notices(sess, int(center_id)), "notices", "notice"))
     if not args.no_albums:
-        kinds.append(("앨범", lambda: _list_albums(sess, int(target["id"]))))
-    for label, lister in kinds:
+        kinds.append(("앨범", lambda: _list_albums(sess, int(target["id"])), "albums", "album"))
+    for label, lister, ckind, cscope in kinds:
         try:
             items = lister()
         except Exception as e:
@@ -491,7 +560,10 @@ def _save_extras(
         n_new = 0
         for it in items:
             try:
-                _folder, n = _save_report(sess, it, root / label)
+                _folder, n = _save_report(
+                    sess, it, root / label,
+                    comment_kind=ckind if args.save_comments else None,
+                    comment_scope=cscope)
                 n_new += n
             except Exception as e:
                 _LOGGER.warning("extras: %s id=%s save failed: %s",
@@ -710,6 +782,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="Skip center-wide notice sync.")
     ap.add_argument("--no-albums", action="store_true",
                     help="Skip photo album sync.")
+    ap.add_argument("--save-comments", action="store_true",
+                    help="Local save: also write each item's comments to comments.txt "
+                         "(other parents' comments on center-wide notices are skipped).")
     ap.add_argument("--extras-root", type=Path,
                     help="Also save notices / albums / daily menus as files under "
                          "<extras-root>/공지, /앨범, /식단 (same per-item folder layout "
@@ -970,7 +1045,9 @@ def main(argv: list[str] | None = None) -> int:
             )
             _LOGGER.info("dumped raw JSON to %s", raw_path)
         for r in reports:
-            folder, n_new = _save_report(sess, r, args.backup_root)
+            folder, n_new = _save_report(
+                sess, r, args.backup_root,
+                comment_kind="reports" if args.save_comments else None)
             total_new_files += n_new
             if args.verbose:
                 _LOGGER.debug("  %s  (+%d files)", folder.name, n_new)

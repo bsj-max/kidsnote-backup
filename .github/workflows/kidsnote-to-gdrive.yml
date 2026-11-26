@@ -3,7 +3,7 @@
 # 매일 새벽 1시(한국시간)에 알림장·공지·앨범·식단 원본(본문·사진·동영상·첨부파일)을
 # 용량 제한 없이 구글 드라이브에 저장합니다. 노션 백업과는 별개로 돌아갑니다.
 #
-# 저장 구조:  <GDRIVE_PATH>/알림장|공지|앨범/<YYYYMMDD_HHMMSS>/note.txt, image_001.jpg, video_001.mp4 ...
+# 저장 구조:  <GDRIVE_PATH>/알림장|공지|앨범/<YYYYMMDD_HHMMSS>/note.txt, comments.txt, image_001.jpg, video_001.mp4 ...
 #             <GDRIVE_PATH>/식단/<YYYYMMDD>/menu.txt, lunch_01.jpg ...
 # 이미 드라이브에 있는 파일은 건너뜁니다(--ignore-existing).
 #
@@ -82,7 +82,7 @@ jobs:
           PYTHONUNBUFFERED: "1"
         run: |
           set -eu
-          ARGS=( "--auth-mode" "session-cookie-env"
+          ARGS=( "--auth-mode" "session-cookie-env" "--save-comments"
                  "--backup-root" "$RUNNER_TEMP/kidsnote/알림장"
                  "--extras-root" "$RUNNER_TEMP/kidsnote" )
           if [ -n "$KIDSNOTE_CHILD_NAME" ]; then
@@ -104,4 +104,7 @@ jobs:
           chmod 600 ~/.config/rclone/rclone.conf
           rclone copy "$RUNNER_TEMP/kidsnote" "gdrive:$GDRIVE_PATH" \
             --ignore-existing --transfers 4 --stats-one-line --stats 30s -v
+          # 댓글은 나중에 늘어나므로 내용이 바뀐 comments.txt만 덮어씁니다.
+          rclone copy "$RUNNER_TEMP/kidsnote" "gdrive:$GDRIVE_PATH" \
+            --include "**/comments.txt" --checksum --transfers 4 -v
           rm -f ~/.config/rclone/rclone.conf
