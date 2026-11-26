@@ -868,7 +868,8 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # Sanity: at least one output channel must be active.
-    if not args.no_local_save and args.backup_root is None:
+    if (not args.no_local_save and args.backup_root is None
+            and args.list_children_json is None):
         sys.exit("--backup-root is required unless --no-local-save is set.")
     if args.no_local_save and not args.publish_to_notion:
         sys.exit("--no-local-save is only useful with --publish-to-notion.")

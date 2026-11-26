@@ -95,3 +95,33 @@ class FetchAuthTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipIf(fetch is None, "fetch.py dependencies (requests) not installed")
+class ChildRosterTest(unittest.TestCase):
+    """--list-children-json works without --backup-root (Drive workflow step 1)."""
+
+    def test_roster_written_without_backup_root(self):
+        kn = FakeKidsnote({USER: PASSWORD})
+        kn.children = [{"id": 11, "name": "테스트아이"}, {"id": 22, "name": "테스트아이"}]
+        with FakeServer(kn) as server, tempfile.TemporaryDirectory() as tmp:
+            env_file = Path(tmp, ".env")
+            env_file.write_text("", encoding="utf-8")
+            out = Path(tmp, "children.json")
+            with mock.patch.object(ka, "KIDSNOTE_BASE", server.url), \
+                    mock.patch.object(ka, "_sleep", lambda s: None), \
+                    mock.patch.object(fetch, "_list_children", lambda sess: kn.children), \
+                    mock.patch.object(fetch, "_list_reports", lambda sess, cid: [
+                        {"date_written": "2021-03-02"}, {"date_written": "2019-04-01"}]), \
+                    mock.patch.dict(os.environ, {"KIDSNOTE_USERNAME": USER,
+                                                 "KIDSNOTE_PASSWORD": PASSWORD}):
+                rc = fetch.main(["--auth-mode", "session-cookie-env",
+                                 "--list-children-json", str(out),
+                                 "--env-file", str(env_file)])
+            self.assertEqual(rc, 0)
+            import json
+            roster = json.loads(out.read_text(encoding="utf-8"))
+            self.assertEqual([r["id"] for r in roster], [11, 22])
+            self.assertEqual(roster[0]["folder"], "2019-2021_11")
+            for r in roster:
+                self.assertNotIn("테스트아이", r["folder"])
